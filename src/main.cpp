@@ -32,6 +32,8 @@ const int touchPin = 4; // T0 en GPIO4
 const int touchThreshold = 40; // Umbral de sensibilidad (ajusta si es necesario)
 
 static osjob_t sendjob;
+static osjob_t keepaliveJob;              // job para uplinks vacíos
+const unsigned KEEPALIVE_INTERVAL = 15;   // segundos entre keepalives (reduce latencia)
 
 void do_send(osjob_t* j){
   // Asegurarse de que no haya una transmisión en curso
@@ -45,6 +47,15 @@ void do_send(osjob_t* j){
   // Ya no se agenda el siguiente envío automáticamente
 }
 
+// Uplink vacío periódico para abrir las ventanas RX (Clase A)
+void do_keepalive(osjob_t* j){
+  if (!(LMIC.opmode & OP_TXRXPEND)){
+    Serial.println(F("[INFO] Keepalive: uplink vacío para abrir RX"));
+    LMIC_setTxData2(223, NULL, 0, 0); // puerto 223, payload 0 bytes
+  }
+  os_setTimedCallback(&keepaliveJob, os_getTime()+sec2osticks(KEEPALIVE_INTERVAL), do_keepalive);
+}
+
 void onEvent (ev_t ev){
   Serial.print(F("[LMIC] Evento: "));
   Serial.println(ev);
@@ -52,9 +63,10 @@ void onEvent (ev_t ev){
     case EV_JOINING:   Serial.println(F("OTAA: uniendo...")); break;
     case EV_JOINED:
       Serial.println(F("OTAA: unido!"));
-      Serial.println(F("Dispositivo listo. Toca el pin GPIO4 para enviar un mensaje."));
-      LMIC_setLinkCheckMode(0);          // recomendado
-      // Ya no se envía un paquete al unirse
+      LMIC_setLinkCheckMode(0); // recomendado
+      // Arranca keepalive para abrir RX sin interacción
+      os_setTimedCallback(&keepaliveJob, os_getTime()+sec2osticks(KEEPALIVE_INTERVAL), do_keepalive);
+      Serial.println(F("Clase A: keepalive activo. Downlinks llegarán tras cada uplink."));
       break;
     case EV_JOIN_FAILED:
       Serial.println(F("OTAA: fallo de join"));
@@ -63,15 +75,26 @@ void onEvent (ev_t ev){
     case EV_TXCOMPLETE:
       Serial.print(F("TX completo. "));
       if (LMIC.txrxFlags & TXRX_ACK) Serial.print(F("ACK "));
+      
       if (LMIC.dataLen){
-        Serial.print(F("Downlink "));
+        Serial.print(F("Downlink recibido de "));
         Serial.print(LMIC.dataLen);
-        Serial.print(F(" bytes: "));
-        for (uint8_t i=0;i<LMIC.dataLen;i++){
+        Serial.print(F(" bytes en el puerto "));
+        Serial.println(LMIC.frame[LMIC.dataBeg-1]);
+        
+        Serial.print(F("  Datos (HEX): "));
+        for (uint8_t i=0; i<LMIC.dataLen; i++){
           Serial.print(LMIC.frame[LMIC.dataBeg+i], HEX); Serial.print(' ');
         }
+        Serial.println();
+
+        Serial.print(F("  Datos (ASCII): "));
+        for (uint8_t i=0; i<LMIC.dataLen; i++){
+          Serial.print((char)LMIC.frame[LMIC.dataBeg+i]);
+        }
+        Serial.println();
       }
-      Serial.println();
+      
       Serial.println(F("Esperando siguiente toque..."));
       break;
     default:
@@ -91,16 +114,16 @@ void setup(){
   os_init();
   LMIC_reset();
 
-  // Compensación reloj en ESP32 (aumenta tolerancia si tienes problemas de join)
-  LMIC_setClockError(MAX_CLOCK_ERROR * 1 / 20); // 5% tolerancia
+  // Compensación reloj en ESP32 (más tolerancia para sincronizar RX)
+  LMIC_setClockError(MAX_CLOCK_ERROR / 10); // 10% tolerancia
 
   // DR/Potencia inicial (TTN EU868: RX2 SF9 por defecto)
   LMIC_setDrTxpow(DR_SF7, 14);
+  // Asegura parámetros RX2 por claridad (TTN EU868)
+  LMIC.dn2Dr = DR_SF9;
+  LMIC.dn2Freq = 869525000;
 
-  // Forzar join solo por canal 0 (868.1 MHz) para gateways single-channel
-  for (uint8_t i = 1; i < 9; i++) {
-    LMIC_disableChannel(i);
-  }
+  // EU868: deja todos los canales por defecto (mejor con gateways multicanal)
 
   // EU868: NO uses LMIC_selectSubBand (es para US915)
   LMIC_startJoining();
