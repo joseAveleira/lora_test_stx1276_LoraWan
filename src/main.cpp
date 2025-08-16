@@ -27,18 +27,22 @@ const lmic_pinmap lmic_pins = {
   .dio  = { 26, 33, 32 }     // DIO0, DIO1, DIO2
 };
 
+// Pin táctil capacitivo
+const int touchPin = 4; // T0 en GPIO4
+const int touchThreshold = 40; // Umbral de sensibilidad (ajusta si es necesario)
+
 static osjob_t sendjob;
-const unsigned TX_INTERVAL = 60; // s
 
 void do_send(osjob_t* j){
+  // Asegurarse de que no haya una transmisión en curso
   if (LMIC.opmode & OP_TXRXPEND) {
-    Serial.println(F("[WARN] Radio ocupada, esperando siguiente ciclo..."));
+    Serial.println(F("[WARN] Radio ocupada, no se puede enviar ahora."));
   } else {
     static const char msg[] = "Hola LoRaWAN!";
-    Serial.println(F("[INFO] Enviando paquete uplink..."));
+    Serial.println(F("[INFO] Enviando paquete por pulso táctil..."));
     LMIC_setTxData2(1, (uint8_t*)msg, sizeof(msg)-1, 0); // port=1, unconfirmed
   }
-  os_setTimedCallback(&sendjob, os_getTime()+sec2osticks(TX_INTERVAL), do_send);
+  // Ya no se agenda el siguiente envío automáticamente
 }
 
 void onEvent (ev_t ev){
@@ -48,8 +52,9 @@ void onEvent (ev_t ev){
     case EV_JOINING:   Serial.println(F("OTAA: uniendo...")); break;
     case EV_JOINED:
       Serial.println(F("OTAA: unido!"));
+      Serial.println(F("Dispositivo listo. Toca el pin GPIO4 para enviar un mensaje."));
       LMIC_setLinkCheckMode(0);          // recomendado
-      do_send(&sendjob);
+      // Ya no se envía un paquete al unirse
       break;
     case EV_JOIN_FAILED:
       Serial.println(F("OTAA: fallo de join"));
@@ -67,6 +72,7 @@ void onEvent (ev_t ev){
         }
       }
       Serial.println();
+      Serial.println(F("Esperando siguiente toque..."));
       break;
     default:
       Serial.println(F("[INFO] Otro evento LMIC."));
@@ -77,7 +83,7 @@ void onEvent (ev_t ev){
 void setup(){
   Serial.begin(115200);
   delay(1000);
-  Serial.println(F("LMIC OTAA EU868"));
+  Serial.println(F("LMIC OTAA EU868 - Envio por pulso tactil"));
 
   // SPI por VSPI con tus pines (verifica que coincidan con tu wiring)
   SPI.begin(18, 19, 23); // SCK=18, MISO=19, MOSI=23
@@ -91,12 +97,25 @@ void setup(){
   // DR/Potencia inicial (TTN EU868: RX2 SF9 por defecto)
   LMIC_setDrTxpow(DR_SF7, 14);
 
+  // Forzar join solo por canal 0 (868.1 MHz) para gateways single-channel
+  for (uint8_t i = 1; i < 9; i++) {
+    LMIC_disableChannel(i);
+  }
+
   // EU868: NO uses LMIC_selectSubBand (es para US915)
   LMIC_startJoining();
 
-  Serial.println(F("[INFO] Esperando join OTAA..."));
+  Serial.println(F("[INFO] Esperando join OTAA solo por canal 0 (868.1 MHz)..."));
 }
 
 void loop(){
   os_runloop_once();
+
+  // Leer el pin táctil
+  if (touchRead(touchPin) < touchThreshold) {
+    // Llamar a do_send solo si la radio está libre
+    do_send(&sendjob);
+    // Esperar un poco para evitar envíos múltiples por un solo toque (debounce)
+    delay(2000);
+  }
 }
